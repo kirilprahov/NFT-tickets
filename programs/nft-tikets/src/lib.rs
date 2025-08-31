@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, Transfer};
 use anchor_lang::solana_program::sysvar;
 use anchor_spl::metadata::{set_and_verify_sized_collection_item, SetAndVerifySizedCollectionItem};
 use anchor_spl::{
@@ -25,7 +26,17 @@ pub mod nft_tikets {
         uri: String,
         seller_fee_bps: u16,
         is_mutable: bool,
+        price: u64,
+        event_ts: u64,
     ) -> Result<()> {
+        let bump = ctx.bumps.treasury;
+        ctx.accounts.treasury.set_inner(Treasury {
+            authority: ctx.accounts.update_authority.key(),
+            collection_mint: ctx.accounts.mint.key(),
+            event_ts,
+            bump,
+            price,
+        });
         helpers::mint_one_event(&ctx.accounts)?;
         helpers::create_metadata_event(
             &ctx.accounts,
@@ -46,6 +57,7 @@ pub mod nft_tikets {
         seller_fee_bps: u16,
         is_mutable: bool,
     ) -> Result<()> {
+        helpers::buy_ticket(&ctx.accounts)?;
         helpers::mint_one(&ctx.accounts)?;
         helpers::create_metadata_ticket(
             &ctx.accounts,
@@ -78,44 +90,57 @@ mod helpers {
 
     use super::*;
 
-    pub fn mint_one(a: &Ticket) -> Result<()> {
+    pub fn mint_one(ctx: &Ticket) -> Result<()> {
+        let seeds: &[&[u8]] = &[
+            b"treasury",
+            ctx.treasury.collection_mint.as_ref(),
+            &[ctx.treasury.bump]
+        ];
         spl_if::mint_to(
-            CpiContext::new(
-                a.token_program.to_account_info(),
+            CpiContext::new_with_signer(
+                ctx.token_program.to_account_info(),
                 MintTo {
-                    mint: a.mint.to_account_info(),
-                    to: a.owner_token_account.to_account_info(),
-                    authority: a.mint_authority.to_account_info(),
+                    mint: ctx.mint.to_account_info(),
+                    to: ctx.associated_token_account.to_account_info(),
+                    authority: ctx.treasury.to_account_info(),
                 },
+                &[seeds],
             ),
             1,
         )
     }
-    pub fn mint_one_event(a: &Event) -> Result<()> {
+    pub fn mint_one_event(ctx: &Event) -> Result<()> {
+        let binding = ctx.mint.key();
+        let seeds: &[&[u8]] = &[
+            b"treasury",
+            binding.as_ref(),
+            &[ctx.treasury.bump]
+        ];
         spl_if::mint_to(
-            CpiContext::new(
-                a.token_program.to_account_info(),
+            CpiContext::new_with_signer(
+                ctx.token_program.to_account_info(),
                 MintTo {
-                    mint: a.mint.to_account_info(),
-                    to: a.owner_token_account.to_account_info(),
-                    authority: a.mint_authority.to_account_info(),
+                    mint: ctx.mint.to_account_info(),
+                    to: ctx.associated_token_account.to_account_info(),
+                    authority: ctx.treasury.to_account_info(),
                 },
+                &[seeds],
             ),
             1,
         )
     }
 
     pub fn create_metadata_event(
-        a: &Event,
+        ctx: &Event,
         name: String,
         symbol: String,
         uri: String,
         seller_fee_basis_points: u16,
         is_mutable: bool,
     ) -> Result<()> {
-        super::pda_checks(&a.metadata, &a.master_edition, &a.mint)?;
+        super::pda_checks(&ctx.metadata, &ctx.master_edition, &ctx.mint)?;
         let creators = vec![Creator {
-            address: a.update_authority.key(),
+            address: ctx.update_authority.key(),
             verified: false,
             share: 100,
         }];
@@ -135,30 +160,37 @@ mod helpers {
             decimals: Some(0),
             print_supply: Some(PrintSupply::Zero),
         };
-        Ok(CreateCpiBuilder::new(&a.token_metadata_program)
-            .metadata(&a.metadata)
-            .master_edition(Some(&a.master_edition))
-            .mint(&a.mint.to_account_info(), true)
-            .authority(&a.mint_authority)
-            .payer(&a.payer)
-            .update_authority(&a.update_authority, true)
-            .system_program(&a.system_program)
-            .spl_token_program(Some(&a.token_program))
-            .sysvar_instructions(&a.sysvar_instructions)
+        let binding = ctx.mint.key();
+        let seeds: &[&[u8]] = &[
+            b"treasury",
+            binding.as_ref(),
+            &[ctx.treasury.bump]
+        ];
+
+        Ok(CreateCpiBuilder::new(&ctx.token_metadata_program)
+            .metadata(&ctx.metadata)
+            .master_edition(Some(&ctx.master_edition))
+            .mint(&ctx.mint.to_account_info(), true)
+            .authority(&ctx.treasury.to_account_info())
+            .payer(&ctx.payer)
+            .update_authority(&ctx.update_authority, true)
+            .system_program(&ctx.system_program)
+            .spl_token_program(Some(&ctx.token_program))
+            .sysvar_instructions(&ctx.sysvar_instructions)
             .create_args(args)
-            .invoke()?)
+            .invoke_signed(&[seeds])?)
     }
     pub fn create_metadata_ticket(
-        a: &Ticket,
+        ctx: &Ticket,
         name: String,
         symbol: String,
         uri: String,
         seller_fee_basis_points: u16,
         is_mutable: bool,
     ) -> Result<()> {
-        super::pda_checks(&a.metadata, &a.master_edition, &a.mint)?;
+        super::pda_checks(&ctx.metadata, &ctx.master_edition, &ctx.mint)?;
         let creators = vec![Creator {
-            address: a.update_authority.key(),
+            address: ctx.update_authority.key(),
             verified: false,
             share: 100,
         }];
@@ -172,7 +204,7 @@ mod helpers {
             is_mutable,
             token_standard: TokenStandard::NonFungible,
             collection: Some(Collection {
-                key: a.collection_mint.key(),
+                key: ctx.collection_mint.key(),
                 verified: false,
             }),
             uses: Some(Uses {
@@ -185,18 +217,33 @@ mod helpers {
             decimals: Some(0),
             print_supply:  Some(PrintSupply::Zero),
         };
-        Ok(CreateCpiBuilder::new(&a.token_metadata_program)
-            .metadata(&a.metadata)
-            .master_edition(Some(&a.master_edition))
-            .mint(&a.mint.to_account_info(), true)
-            .authority(&a.mint_authority)
-            .payer(&a.payer)
-            .update_authority(&a.update_authority, true)
-            .system_program(&a.system_program)
-            .spl_token_program(Some(&a.token_program))
-            .sysvar_instructions(&a.sysvar_instructions)
+        let seeds: &[&[u8]] = &[
+            b"treasury",
+            ctx.treasury.collection_mint.as_ref(),
+            &[ctx.treasury.bump],
+        ];
+        Ok(CreateCpiBuilder::new(&ctx.token_metadata_program)
+            .metadata(&ctx.metadata)
+            .master_edition(Some(&ctx.master_edition))
+            .mint(&ctx.mint.to_account_info(), true)
+            .authority(&ctx.treasury.to_account_info())
+            .payer(&ctx.payer)
+            .update_authority(&ctx.update_authority, true)
+            .system_program(&ctx.system_program)
+            .spl_token_program(Some(&ctx.token_program))
+            .sysvar_instructions(&ctx.sysvar_instructions)
             .create_args(args)
-            .invoke()?)
+            .invoke_signed(&[seeds])?)
+    }
+    pub fn buy_ticket(ctx: &Ticket) -> Result<()> {
+        let price = ctx.treasury.price;
+        let cpi_program = ctx.system_program.to_account_info();
+        let cpi_accounts = Transfer {
+            from: ctx.payer.to_account_info(),
+            to: ctx.treasury.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        system_program::transfer(cpi_ctx, price)
     }
 
     // pub fn create_master_edition(a: &Ticket) -> Result<()> {
@@ -256,23 +303,41 @@ fn pda_checks(
     require_keys_eq!(ed, master_edition.key(), NftError::BadEditionPda);
     Ok(())
 }
+#[account]
+#[derive(InitSpace)]
+pub struct Treasury {
+    pub authority: Pubkey,
+    pub collection_mint: Pubkey,
+    pub event_ts: u64,
+    pub bump: u8,
+    pub price: u64,
+}
+
+
 #[derive(Accounts)]
 pub struct Event<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     pub update_authority: Signer<'info>,
-    pub mint_authority: Signer<'info>,
 
     #[account(
         init,
         payer = payer,
         mint::decimals = 0,
-        mint::authority = mint_authority,
-        mint::freeze_authority = mint_authority,
+        mint::authority = treasury,
+        mint::freeze_authority = treasury,
         // with classic SPL Token types, this must be Program<Token>
         mint::token_program = token_program,
     )]
     pub mint: Account<'info, Mint>,
+
+    #[account(init,
+    payer = payer,
+    seeds = [b"treasury", mint.key().as_ref()],
+    bump,
+    space = 8 + Treasury::INIT_SPACE,
+    )]
+    pub treasury: Account<'info, Treasury>,
 
     pub owner: SystemAccount<'info>,
 
@@ -283,7 +348,7 @@ pub struct Event<'info> {
         associated_token::authority = owner,
         associated_token::token_program = token_program
     )]
-    pub owner_token_account: Account<'info, TokenAccount>,
+    pub associated_token_account: Account<'info, TokenAccount>,
 
     /// CHECK:
     #[account(mut)]
@@ -308,14 +373,19 @@ pub struct Ticket<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     pub update_authority: Signer<'info>,
-    pub mint_authority: Signer<'info>,
+    #[account(
+    mut,
+    seeds = [b"treasury", treasury.collection_mint.key().as_ref()],
+    bump = treasury.bump,
+    )]
+    pub treasury: Account<'info, Treasury>,
 
     #[account(
         init,
         payer = payer,
         mint::decimals = 0,
-        mint::authority = mint_authority,
-        mint::freeze_authority = mint_authority,
+        mint::authority = treasury,
+        mint::freeze_authority = treasury,
         mint::token_program = token_program,
     )]
     pub mint: Account<'info, Mint>,
@@ -329,7 +399,7 @@ pub struct Ticket<'info> {
         associated_token::authority = owner,
         associated_token::token_program = token_program
     )]
-    pub owner_token_account: Account<'info, TokenAccount>,
+    pub associated_token_account: Account<'info, TokenAccount>,
 
     // collection data
     /// CHECK:

@@ -2,7 +2,13 @@ import * as anchor from "@coral-xyz/anchor";
 import { expect } from "chai";
 
 import { Program } from "@coral-xyz/anchor";
-import { Keypair, ComputeBudgetProgram, SystemProgram, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+    Keypair,
+    ComputeBudgetProgram,
+    SystemProgram,
+    PublicKey,
+    LAMPORTS_PER_SOL,
+} from "@solana/web3.js";
 import {
     getAssociatedTokenAddressSync,
     TOKEN_PROGRAM_ID,
@@ -10,26 +16,21 @@ import {
     getAccount,
 } from "@solana/spl-token";
 
-
 // Token Metadata program
-const TOKEN_METADATA_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"); // mainnet id used on all clusters
+const TOKEN_METADATA_ID = new PublicKey(
+    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+); // mainnet id used on all clusters
 const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
     "Sysvar1nstructions1111111111111111111111111"
 );
 
-
 // PDAs for metadata & edition
 function findMetadataPda(mint: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync(
-        [
-            Buffer.from("metadata"),
-            TOKEN_METADATA_ID.toBuffer(),
-            mint.toBuffer(),
-        ],
+        [Buffer.from("metadata"), TOKEN_METADATA_ID.toBuffer(), mint.toBuffer()],
         TOKEN_METADATA_ID
     )[0];
 }
-
 function findMasterEditionPda(mint: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync(
         [
@@ -41,102 +42,44 @@ function findMasterEditionPda(mint: PublicKey): PublicKey {
         TOKEN_METADATA_ID
     )[0];
 }
+// Treasury PDA: [b"treasury", mint]
+function findTreasuryPda(programId: PublicKey, mint: PublicKey): PublicKey {
+    return PublicKey.findProgramAddressSync(
+        [Buffer.from("treasury"), mint.toBuffer()],
+        programId
+    )[0];
+}
 
-describe("nft_tikets", () => {
+describe("nft_tikets – end-to-end", () => {
     const provider = anchor.AnchorProvider.local();
     anchor.setProvider(provider);
     const connection = provider.connection;
 
-    // If you generated TypeScript types, you can import them; otherwise use `any`
     const program = anchor.workspace.nft_tikets as Program<any>;
 
-    // Test actors
-    const payer = (provider.wallet as anchor.Wallet);
+    // Actors
+    const payer = provider.wallet as anchor.Wallet;
     const updateAuthority = Keypair.generate();
-    const mintAuthority = Keypair.generate();
-    const owner = Keypair.generate();
 
-    // Mint/ATA addresses (program will init them)
-    const mint = Keypair.generate();
-    const ownerAta = getAssociatedTokenAddressSync(
-        mint.publicKey,
-        owner.publicKey,
-        false,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-
-    // Metadata PDAs
-    const metadata = findMetadataPda(mint.publicKey);
-    const masterEdition = findMasterEditionPda(mint.publicKey);
-
-    // helper: airdrop to a signer
+    // helper: airdrop
     const airdrop = async (pubkey: PublicKey, sol = 1) => {
-        const sig = await connection.requestAirdrop(pubkey, sol * LAMPORTS_PER_SOL);
+        const sig = await connection.requestAirdrop(
+            pubkey,
+            sol * LAMPORTS_PER_SOL
+        );
         await connection.confirmTransaction(sig, "confirmed");
     };
 
-    it("mints an event NFT and verifies accounts", async () => {
-        // fund the extra signers so they can pay rent if needed
-        await airdrop(updateAuthority.publicKey, 1);
-        await airdrop(mintAuthority.publicKey, 1);
-        await airdrop(owner.publicKey, 1);
+    it("creates an event (collection) and buys a ticket; verifies transfer and owners", async () => {
+        // fund required signers
+        await airdrop(updateAuthority.publicKey, 2);
 
-        const name = "My Event";
-        const symbol = "EVT";
-        const uri = "https://example.com/metadata.json";
-        const sellerFeeBps = 500; // 5%
-        const isMutable = true;
-
-        // call the instruction
-        const txSig = await program.methods
-            .mintNftEvent(name, symbol, uri, sellerFeeBps, isMutable)
-            .accounts({
-                payer: payer.publicKey,
-                updateAuthority: updateAuthority.publicKey,
-                mintAuthority: mintAuthority.publicKey,
-                mint: mint.publicKey,
-                owner: owner.publicKey,
-                ownerTokenAccount: ownerAta,
-                metadata,
-                masterEdition,
-                systemProgram: SystemProgram.programId,
-                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-                tokenProgram: TOKEN_PROGRAM_ID,
-                tokenMetadataProgram: TOKEN_METADATA_ID,
-                sysvarInstructions: SYSVAR_INSTRUCTIONS_PUBKEY, // <-- add this
-            })
-            .signers([updateAuthority, mintAuthority, mint])
-            .rpc();
-
-        console.log("mint:", mint.publicKey.toBase58());
-        console.log("owner:", owner.publicKey.toBase58());
-        console.log("ownerAta:", ownerAta.toBase58());
-        console.log("tx:", txSig);
-
-        const latest = await connection.getLatestBlockhash();
-        await connection.confirmTransaction({ signature: txSig, ...latest }, "confirmed");
-
-        const ataAcc = await getAccount(connection, ownerAta, "confirmed", TOKEN_PROGRAM_ID);
-        expect(ataAcc.amount).to.equal(1n);
-
-        // Basic assertions
-
-
-
-        // 2) Metadata and Master Edition PDAs should exist
-        const mdAcc = await connection.getAccountInfo(metadata, "confirmed");
-        const meAcc = await connection.getAccountInfo(masterEdition, "confirmed");
-        expect(mdAcc).to.not.be.null;
-        expect(meAcc).to.not.be.null;
-
-        // 3) Optional: log the tx for debugging
-        console.log("Minted event NFT tx:", txSig);
-    }
-    );
-    it("mints a TICKET NFT into a VERIFIED SIZED COLLECTION", async () => {
+        //
+        // 1) EVENT (Sized Collection)
+        //
         const collectionMint = Keypair.generate();
-        const collectionOwner = Keypair.generate();
+        const collectionOwner = Keypair.generate(); // collection NFT holder
+
         const collectionAta = getAssociatedTokenAddressSync(
             collectionMint.publicKey,
             collectionOwner.publicKey,
@@ -144,30 +87,35 @@ describe("nft_tikets", () => {
             TOKEN_PROGRAM_ID,
             ASSOCIATED_TOKEN_PROGRAM_ID
         );
-
         const collectionMetadata = findMetadataPda(collectionMint.publicKey);
-        const collectionEdition  = findMasterEditionPda(collectionMint.publicKey);
-
-        await connection.confirmTransaction(
-            await connection.requestAirdrop(collectionOwner.publicKey, (LAMPORTS_PER_SOL)),
-            "confirmed"
+        const collectionEdition = findMasterEditionPda(collectionMint.publicKey);
+        const collectionTreasury = findTreasuryPda(
+            program.programId,
+            collectionMint.publicKey
         );
 
-        const collTx = await program.methods
+        await airdrop(collectionOwner.publicKey, 1);
+
+        const price = new anchor.BN(1_000_000); // 0.001 SOL
+        const eventTs = new anchor.BN(Math.floor(Date.now() / 1000));
+
+        const createEventTx = await program.methods
             .mintNftEvent(
                 "My Collection",
                 "COLL",
                 "https://example.com/collection.json",
                 500,
-                true
+                true,
+                price,
+                eventTs
             )
             .accounts({
-                payer: provider.wallet.publicKey,
+                payer: payer.publicKey,
                 updateAuthority: updateAuthority.publicKey,
-                mintAuthority: mintAuthority.publicKey,
                 mint: collectionMint.publicKey,
+                treasury: collectionTreasury, // <-- required
                 owner: collectionOwner.publicKey,
-                ownerTokenAccount: collectionAta,
+                associatedTokenAccount: collectionAta,
                 metadata: collectionMetadata,
                 masterEdition: collectionEdition,
                 systemProgram: SystemProgram.programId,
@@ -176,27 +124,38 @@ describe("nft_tikets", () => {
                 tokenMetadataProgram: TOKEN_METADATA_ID,
                 sysvarInstructions: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
-            .signers([updateAuthority, mintAuthority, collectionMint])
+            .signers([updateAuthority, collectionMint])
             .rpc();
-
 
         {
             const latest = await connection.getLatestBlockhash();
-            await connection.confirmTransaction({ signature: collTx, ...latest }, "confirmed");
+            await connection.confirmTransaction(
+                { signature: createEventTx, ...latest },
+                "confirmed"
+            );
 
-            const ataAcc = await getAccount(connection, collectionAta, "confirmed", TOKEN_PROGRAM_ID);
-            expect(Number(ataAcc.amount)).to.equal(1);
+            // assert collection owner holds 1 NFT
+            const ataAcc = await getAccount(
+                connection,
+                collectionAta,
+                "confirmed",
+                TOKEN_PROGRAM_ID
+            );
+            expect(ataAcc.amount).to.equal(1n);
 
-            const md = await connection.getAccountInfo(collectionMetadata, { commitment: "confirmed" });
-            const me = await connection.getAccountInfo(collectionEdition, { commitment: "confirmed" });
+            // assert metadata/master edition exist
+            const md = await connection.getAccountInfo(collectionMetadata, "confirmed");
+            const me = await connection.getAccountInfo(collectionEdition, "confirmed");
             expect(md).to.not.be.null;
             expect(me).to.not.be.null;
-
-            console.log("Collection minted:", collTx);
         }
 
+        //
+        // 2) BUY TICKET (mintNftTicket) into collection
+        //
         const ticketMint = Keypair.generate();
         const ticketOwner = Keypair.generate();
+
         const ticketAta = getAssociatedTokenAddressSync(
             ticketMint.publicKey,
             ticketOwner.publicKey,
@@ -204,17 +163,26 @@ describe("nft_tikets", () => {
             TOKEN_PROGRAM_ID,
             ASSOCIATED_TOKEN_PROGRAM_ID
         );
-
         const ticketMetadata = findMetadataPda(ticketMint.publicKey);
-        const ticketEdition  = findMasterEditionPda(ticketMint.publicKey);
+        const ticketEdition = findMasterEditionPda(ticketMint.publicKey);
 
-        await connection.confirmTransaction(
-            await connection.requestAirdrop(ticketOwner.publicKey, (LAMPORTS_PER_SOL)),
-            "confirmed"
+        await airdrop(ticketOwner.publicKey, 1);
+
+        // capture balances before purchase
+        const payerBefore = BigInt(await connection.getBalance(payer.publicKey));
+        const treasuryBefore = BigInt(
+            await connection.getBalance(collectionTreasury)
         );
-        const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 });
-        const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 });
-        const ticketTx = await program.methods
+
+        // optional compute units tweak (not strictly needed on localnet)
+        const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+            units: 800_000,
+        });
+        const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: 1,
+        });
+
+        const buyTicketTx = await program.methods
             .mintNftTicket(
                 "My Ticket #1",
                 "TKT",
@@ -223,21 +191,25 @@ describe("nft_tikets", () => {
                 true
             )
             .accounts({
-
-                payer: provider.wallet.publicKey,
+                payer: payer.publicKey,
                 updateAuthority: updateAuthority.publicKey,
-                mintAuthority: mintAuthority.publicKey,
+
+                // previously created collection treasury
+                treasury: collectionTreasury,
+
                 mint: ticketMint.publicKey,
                 owner: ticketOwner.publicKey,
-                ownerTokenAccount: ticketAta,
-                metadata: ticketMetadata,
-                masterEdition: ticketEdition,
+                associatedTokenAccount: ticketAta,
 
-
+                // collection
                 collectionMint: collectionMint.publicKey,
                 collectionMetadata: collectionMetadata,
                 collectionMasterEdition: collectionEdition,
                 collectionAuthority: updateAuthority.publicKey,
+
+                // ticket metadata/master edition
+                metadata: ticketMetadata,
+                masterEdition: ticketEdition,
 
                 systemProgram: SystemProgram.programId,
                 associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -246,23 +218,62 @@ describe("nft_tikets", () => {
                 sysvarInstructions: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
             .preInstructions([addPriorityFee, modifyComputeUnits])
-            .signers([updateAuthority, mintAuthority, ticketMint])
+            .signers([updateAuthority, ticketMint])
             .rpc();
 
         {
             const latest = await connection.getLatestBlockhash();
-            await connection.confirmTransaction({ signature: ticketTx, ...latest }, "confirmed");
+            await connection.confirmTransaction(
+                { signature: buyTicketTx, ...latest },
+                "confirmed"
+            );
 
-            const ataAcc = await getAccount(connection, ticketAta, "confirmed", TOKEN_PROGRAM_ID);
-            expect(Number(ataAcc.amount)).to.equal(1);
+            // assert ticket ownership
+            const ataAcc = await getAccount(
+                connection,
+                ticketAta,
+                "confirmed",
+                TOKEN_PROGRAM_ID
+            );
+            expect(ataAcc.amount).to.equal(1n);
 
-            const md = await connection.getAccountInfo(ticketMetadata, { commitment: "confirmed" });
-            const me = await connection.getAccountInfo(ticketEdition, { commitment: "confirmed" });
+            // assert metadata/master edition exist
+            const md = await connection.getAccountInfo(ticketMetadata, "confirmed");
+            const me = await connection.getAccountInfo(ticketEdition, "confirmed");
             expect(md).to.not.be.null;
             expect(me).to.not.be.null;
 
-            console.log("Ticket minted into collection:", ticketTx);
+            // Funds: treasury delta should equal treasury.price
+            const payerAfter = BigInt(await connection.getBalance(payer.publicKey));
+            const treasuryAfter = BigInt(
+                await connection.getBalance(collectionTreasury)
+            );
+            const treasuryDelta = treasuryAfter - treasuryBefore;
+
+            // fetch Treasury account via program (IDL must include "treasury" account)
+            const treasuryAcc = await program.account.treasury.fetch(
+                collectionTreasury
+            );
+            const price = BigInt(treasuryAcc.price.toString()); // BN -> BigInt
+
+            expect(treasuryDelta).to.equal(price);
+
+            // payer includes fees/rent — ensure at least price was debited
+            const payerDelta = payerBefore - payerAfter;
+            expect(payerDelta >= price).to.equal(true);
+
+            // Ownership logs
+            console.log("=== OWNERS ===");
+            console.log("Collection mint:", collectionMint.publicKey.toBase58());
+            console.log("Collection NFT holder:", collectionOwner.publicKey.toBase58());
+            console.log("Collection update authority:", updateAuthority.publicKey.toBase58());
+            console.log("Ticket mint:", ticketMint.publicKey.toBase58());
+            console.log("Ticket NFT holder:", ticketOwner.publicKey.toBase58());
+            console.log("Treasury PDA:", collectionTreasury.toBase58());
+            console.log("Price (lamports):", price.toString());
+            console.log("Treasury Δ (lamports):", treasuryDelta.toString());
+            console.log("Payer Δ (lamports):", payerDelta.toString());
+            console.log("================");
         }
     });
-
 });
