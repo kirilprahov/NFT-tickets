@@ -111,7 +111,7 @@ describe("nft_tikets – end-to-end", () => {
             )
             .accounts({
                 payer: payer.publicKey,
-                updateAuthority: updateAuthority.publicKey,
+                updateAuthority: collectionTreasury,
                 mint: collectionMint.publicKey,
                 treasury: collectionTreasury, // <-- required
                 owner: collectionOwner.publicKey,
@@ -124,7 +124,7 @@ describe("nft_tikets – end-to-end", () => {
                 tokenMetadataProgram: TOKEN_METADATA_ID,
                 sysvarInstructions: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
-            .signers([updateAuthority, collectionMint])
+            .signers([collectionMint])
             .rpc();
 
         {
@@ -192,7 +192,7 @@ describe("nft_tikets – end-to-end", () => {
             )
             .accounts({
                 payer: payer.publicKey,
-                updateAuthority: updateAuthority.publicKey,
+                updateAuthority: collectionTreasury,
 
                 // previously created collection treasury
                 treasury: collectionTreasury,
@@ -205,7 +205,7 @@ describe("nft_tikets – end-to-end", () => {
                 collectionMint: collectionMint.publicKey,
                 collectionMetadata: collectionMetadata,
                 collectionMasterEdition: collectionEdition,
-                collectionAuthority: updateAuthority.publicKey,
+                collectionAuthority: collectionTreasury,
 
                 // ticket metadata/master edition
                 metadata: ticketMetadata,
@@ -218,7 +218,7 @@ describe("nft_tikets – end-to-end", () => {
                 sysvarInstructions: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
             .preInstructions([addPriorityFee, modifyComputeUnits])
-            .signers([updateAuthority, ticketMint])
+            .signers([ticketMint])
             .rpc();
 
         {

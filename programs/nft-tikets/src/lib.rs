@@ -31,7 +31,7 @@ pub mod nft_tikets {
     ) -> Result<()> {
         let bump = ctx.bumps.treasury;
         ctx.accounts.treasury.set_inner(Treasury {
-            authority: ctx.accounts.update_authority.key(),
+            authority: ctx.accounts.treasury.key(),
             collection_mint: ctx.accounts.mint.key(),
             event_ts,
             bump,
@@ -67,17 +67,25 @@ pub mod nft_tikets {
             seller_fee_bps,
             is_mutable,
         )?;
-        let cpi_ctx = CpiContext::new(
+        let bump = [ctx.accounts.treasury.bump];
+        let signer_seeds: [&[u8]; 3] = [
+            b"treasury",
+            ctx.accounts.treasury.collection_mint.as_ref(),
+            &bump,
+        ];
+        let signer_seeds_arr: [&[&[u8]]; 1] = [&signer_seeds];
+        let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_metadata_program.to_account_info(),
             SetAndVerifySizedCollectionItem {
                 metadata: ctx.accounts.metadata.to_account_info(),
                 collection_authority: ctx.accounts.collection_authority.to_account_info(),
                 payer: ctx.accounts.payer.to_account_info(),
-                update_authority: ctx.accounts.update_authority.to_account_info(),
+                update_authority: ctx.accounts.treasury.to_account_info(),
                 collection_mint: ctx.accounts.collection_mint.to_account_info(),
                 collection_metadata: ctx.accounts.collection_metadata.to_account_info(),
                 collection_master_edition: ctx.accounts.collection_master_edition.to_account_info(),
             },
+            &signer_seeds_arr,
         );
         set_and_verify_sized_collection_item(cpi_ctx, None)?;
         //helpers::create_master_edition(&ctx.accounts)?;
@@ -140,7 +148,7 @@ mod helpers {
     ) -> Result<()> {
         super::pda_checks(&ctx.metadata, &ctx.master_edition, &ctx.mint)?;
         let creators = vec![Creator {
-            address: ctx.update_authority.key(),
+            address: ctx.treasury.key(),
             verified: false,
             share: 100,
         }];
@@ -173,7 +181,7 @@ mod helpers {
             .mint(&ctx.mint.to_account_info(), true)
             .authority(&ctx.treasury.to_account_info())
             .payer(&ctx.payer)
-            .update_authority(&ctx.update_authority, true)
+            .update_authority(&ctx.treasury.to_account_info(), true)
             .system_program(&ctx.system_program)
             .spl_token_program(Some(&ctx.token_program))
             .sysvar_instructions(&ctx.sysvar_instructions)
@@ -190,7 +198,7 @@ mod helpers {
     ) -> Result<()> {
         super::pda_checks(&ctx.metadata, &ctx.master_edition, &ctx.mint)?;
         let creators = vec![Creator {
-            address: ctx.update_authority.key(),
+            address: ctx.treasury.key(),
             verified: false,
             share: 100,
         }];
@@ -228,7 +236,7 @@ mod helpers {
             .mint(&ctx.mint.to_account_info(), true)
             .authority(&ctx.treasury.to_account_info())
             .payer(&ctx.payer)
-            .update_authority(&ctx.update_authority, true)
+            .update_authority(&ctx.treasury.to_account_info(), true)
             .system_program(&ctx.system_program)
             .spl_token_program(Some(&ctx.token_program))
             .sysvar_instructions(&ctx.sysvar_instructions)
@@ -318,7 +326,6 @@ pub struct Treasury {
 pub struct Event<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    pub update_authority: Signer<'info>,
 
     #[account(
         init,
@@ -326,7 +333,6 @@ pub struct Event<'info> {
         mint::decimals = 0,
         mint::authority = treasury,
         mint::freeze_authority = treasury,
-        // with classic SPL Token types, this must be Program<Token>
         mint::token_program = token_program,
     )]
     pub mint: Account<'info, Mint>,
@@ -372,7 +378,6 @@ pub struct Event<'info> {
 pub struct Ticket<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    pub update_authority: Signer<'info>,
     #[account(
     mut,
     seeds = [b"treasury", treasury.collection_mint.key().as_ref()],
@@ -409,7 +414,9 @@ pub struct Ticket<'info> {
     pub collection_metadata: UncheckedAccount<'info>,
     /// CHECK:
     pub collection_master_edition: UncheckedAccount<'info>,
-    pub collection_authority: Signer<'info>,
+    /// CHECK:
+    #[account(constraint = collection_authority.key() == treasury.key())]
+    pub collection_authority: UncheckedAccount<'info>,
 
     // ticket metadata
     /// CHECK:
