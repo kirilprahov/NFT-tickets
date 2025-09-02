@@ -1,17 +1,20 @@
 use anchor_lang::prelude::*;
-use anchor_lang::system_program::{self, Transfer};
-use anchor_lang::solana_program::sysvar;
-use anchor_spl::metadata::{set_and_verify_sized_collection_item, SetAndVerifySizedCollectionItem};
+use anchor_lang::solana_program::{self, program::invoke_signed};
+use anchor_lang::system_program::{self, Transfer}; // <-- Anchor's re-export
+
 use anchor_spl::{
     associated_token::AssociatedToken,
-    token_interface::{self as spl_if, MintTo},
-    token::{Mint, Token, TokenAccount}
+    metadata::{set_and_verify_sized_collection_item, SetAndVerifySizedCollectionItem},
+    token::{self as spl_token, Mint, MintTo, Token, TokenAccount},
 };
-use mpl_token_metadata::{
-    instructions::{CreateCpiBuilder, CreateMasterEditionV3CpiBuilder},
+
+use mpl::{
+    accounts::Metadata as MplMetadata,
+    instructions::{CreateCpiBuilder, UtilizeBuilder},
     types::{Collection, CollectionDetails, CreateArgs, Creator, PrintSupply, TokenStandard},
     ID as TOKEN_METADATA_ID,
 };
+use mpl_token_metadata as mpl;
 
 declare_id!("8Z8bsgf7SYGAh1Sy96oz4dfcZtTiPL1pkSLrn6RELkLr");
 
@@ -29,6 +32,7 @@ pub mod nft_tikets {
         price: u64,
         event_ts: u64,
     ) -> Result<()> {
+        msg!("mint_nft_event");
         let bump = ctx.bumps.treasury;
         ctx.accounts.treasury.set_inner(Treasury {
             authority: ctx.accounts.treasury.key(),
@@ -57,6 +61,7 @@ pub mod nft_tikets {
         seller_fee_bps: u16,
         is_mutable: bool,
     ) -> Result<()> {
+        msg!("mint_nft_ticket");
         helpers::buy_ticket(&ctx.accounts)?;
         helpers::mint_one(&ctx.accounts)?;
         helpers::create_metadata_ticket(
@@ -91,6 +96,66 @@ pub mod nft_tikets {
         //helpers::create_master_edition(&ctx.accounts)?;
         Ok(())
     }
+
+    pub fn ticket_usage(ctx: Context<TokenUse>) -> Result<()> {
+        {
+            let data_ref = ctx.accounts.metadata.try_borrow_data()?;
+            let mut slice: &[u8] = &data_ref;
+            let md = MplMetadata::safe_deserialize(&mut slice)
+                .map_err(|_| error!(NftError::InvalidMetadata))?;
+            require_keys_eq!(
+                md.mint,
+                ctx.accounts.mint.key(),
+                NftError::MetadataMintMismatch
+            );
+            let uses = md.uses.as_ref().ok_or(error!(NftError::NoUsesConfigured))?;
+            require!(uses.remaining >= 1, NftError::NoRemainingUses);
+            msg!("uses before {}", uses.remaining);
+        }
+
+        let mut builder = UtilizeBuilder::new();
+        builder
+            .metadata(ctx.accounts.metadata.key())
+            .token_account(ctx.accounts.token_account.key())
+            .mint(ctx.accounts.mint.key())
+            .use_authority(ctx.accounts.owner.key())
+            .owner(ctx.accounts.owner.key())
+            .number_of_uses(1)
+            .token_program(ctx.accounts.token_program.key())
+            .ata_program(ctx.accounts.associated_token_program.key())
+            .system_program(ctx.accounts.system_program.key())
+            .rent(ctx.accounts.rent.key());
+
+        let ix = builder.instruction();
+
+        invoke_signed(
+            &ix,
+            &[
+                ctx.accounts.metadata.to_account_info(),
+                ctx.accounts.token_account.to_account_info(),
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.associated_token_program.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.rent.to_account_info(),
+                ctx.accounts.token_metadata_program.to_account_info(),
+            ],
+            &[],
+        )?;
+        {
+            let data_ref = ctx.accounts.metadata.try_borrow_data()?;
+            let mut slice: &[u8] = &data_ref;
+            let md = MplMetadata::safe_deserialize(&mut slice)
+                .map_err(|_| error!(NftError::InvalidMetadata))?;
+            let uses = md.uses.as_ref().ok_or(error!(NftError::NoUsesConfigured))?;
+            require!(uses.remaining >= 0, NftError::Failed);
+            msg!("uses after {}", uses.remaining);
+        }
+
+        Ok(())
+    }
 }
 
 mod helpers {
@@ -102,9 +167,9 @@ mod helpers {
         let seeds: &[&[u8]] = &[
             b"treasury",
             ctx.treasury.collection_mint.as_ref(),
-            &[ctx.treasury.bump]
+            &[ctx.treasury.bump],
         ];
-        spl_if::mint_to(
+        spl_token::mint_to(
             CpiContext::new_with_signer(
                 ctx.token_program.to_account_info(),
                 MintTo {
@@ -119,12 +184,8 @@ mod helpers {
     }
     pub fn mint_one_event(ctx: &Event) -> Result<()> {
         let binding = ctx.mint.key();
-        let seeds: &[&[u8]] = &[
-            b"treasury",
-            binding.as_ref(),
-            &[ctx.treasury.bump]
-        ];
-        spl_if::mint_to(
+        let seeds: &[&[u8]] = &[b"treasury", binding.as_ref(), &[ctx.treasury.bump]];
+        spl_token::mint_to(
             CpiContext::new_with_signer(
                 ctx.token_program.to_account_info(),
                 MintTo {
@@ -169,11 +230,7 @@ mod helpers {
             print_supply: Some(PrintSupply::Zero),
         };
         let binding = ctx.mint.key();
-        let seeds: &[&[u8]] = &[
-            b"treasury",
-            binding.as_ref(),
-            &[ctx.treasury.bump]
-        ];
+        let seeds: &[&[u8]] = &[b"treasury", binding.as_ref(), &[ctx.treasury.bump]];
 
         Ok(CreateCpiBuilder::new(&ctx.token_metadata_program)
             .metadata(&ctx.metadata)
@@ -223,7 +280,7 @@ mod helpers {
             collection_details: None,
             rule_set: None,
             decimals: Some(0),
-            print_supply:  Some(PrintSupply::Zero),
+            print_supply: Some(PrintSupply::Zero),
         };
         let seeds: &[&[u8]] = &[
             b"treasury",
@@ -321,7 +378,6 @@ pub struct Treasury {
     pub price: u64,
 }
 
-
 #[derive(Accounts)]
 pub struct Event<'info> {
     #[account(mut)]
@@ -370,7 +426,7 @@ pub struct Event<'info> {
     #[account(address = TOKEN_METADATA_ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
     /// CHECK:
-    #[account(address = sysvar::instructions::ID)]
+    #[account(address = solana_program::sysvar::instructions::ID)]
     pub sysvar_instructions: UncheckedAccount<'info>,
 }
 
@@ -434,8 +490,28 @@ pub struct Ticket<'info> {
     #[account(address = TOKEN_METADATA_ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
     /// CHECK:
-    #[account(address = sysvar::instructions::ID)]
+    #[account(address = solana_program::sysvar::instructions::ID)]
     pub sysvar_instructions: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct TokenUse<'info> {
+    /// CHECK:
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub token_account: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub rent: Sysvar<'info, Rent>,
+    pub system_program: Program<'info, System>,
+    /// CHECK: program id
+    #[account(address = mpl_token_metadata::ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
 }
 
 #[error_code]
@@ -444,4 +520,14 @@ pub enum NftError {
     BadMetadataPda,
     #[msg("Bad master edition PDA")]
     BadEditionPda,
+    #[msg("Invalid metadata account data.")]
+    InvalidMetadata,
+    #[msg("Metadata mint doesn't match the provided mint.")]
+    MetadataMintMismatch,
+    #[msg("This NFT has no 'uses' configured.")]
+    NoUsesConfigured,
+    #[msg("This NFT has no remaining uses.")]
+    NoRemainingUses,
+    #[msg("Use Failed")]
+    Failed
 }
