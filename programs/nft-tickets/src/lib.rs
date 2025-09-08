@@ -62,9 +62,7 @@ mod helpers {
     use anchor_lang::solana_program::program::invoke_signed;
     use anchor_lang::solana_program::system_program;
     use anchor_lang::system_program::transfer;
-    use mpl_token_metadata::instructions::{
-        BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs,
-    };
+    use mpl_token_metadata::instructions::{BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs, SetAndVerifySizedCollectionItemCpiBuilder};
     use mpl_token_metadata::types::{CreateArgs, UseMethod, Uses};
 
     pub fn init_mint(_ctx: Context<InitMint>) -> Result<()> {
@@ -133,7 +131,7 @@ mod helpers {
             .mint(&ctx.accounts.mint.to_account_info(), false)
             .authority(&ctx.accounts.mint_authority.to_account_info())
             .payer(&ctx.accounts.payer.to_account_info())
-            .update_authority(&ctx.accounts.mint_authority.to_account_info(), false)
+            .update_authority(&ctx.accounts.mint_authority.to_account_info(), true)
             .master_edition(Some(&ctx.accounts.master_edition))
             .system_program(&ctx.accounts.system_program)
             .sysvar_instructions(&ctx.accounts.sysvar_instructions)
@@ -147,6 +145,40 @@ mod helpers {
             .decimals(0)
             .collection_details(CollectionDetails::V1 { size: 0 })
             .invoke_signed(&[signer_seeds]);
+        Ok(())
+    }
+    pub fn verify_collection(ctx: Context<VerifyCollection>) -> Result<()> {
+        let bump_coll = ctx.bumps.collection_mint_authority;
+        let col_mint = ctx.accounts.collection_mint.key();
+        let coll_seeds: &[&[&[u8]]] = &[&[
+            b"mint_authority",
+            col_mint.as_ref(),
+            &[bump_coll]],
+        ];
+        let (expected_md_pda, _) =
+            Metadata::find_pda(&ctx.accounts.collection_mint.key());
+        require_keys_eq!(
+        expected_md_pda,
+        ctx.accounts.collection_metadata.key(),
+        ErrorCode::MetadatapdaMismatch
+    );
+        {
+            let data_ref = ctx.accounts.collection_metadata.try_borrow_data()?;
+            let mut slice: &[u8] = &data_ref;
+            let meta = Metadata::deserialize(&mut slice)?;
+            msg!("collection_metadata.update_authority = {}", meta.update_authority);
+            msg!("passed collection_mint_authority     = {}", ctx.accounts.collection_mint_authority.key());
+        }
+        SetAndVerifySizedCollectionItemCpiBuilder::new(&ctx.accounts.token_metadata_program)
+            .metadata(&ctx.accounts.item_metadata)
+            .collection_authority(&ctx.accounts.collection_mint_authority)
+            .payer(&ctx.accounts.payer)
+            .update_authority(&ctx.accounts.collection_mint_authority)
+            .collection_mint(&ctx.accounts.collection_mint.to_account_info())
+            .collection(&ctx.accounts.collection_metadata)
+            .collection_master_edition_account(&ctx.accounts.collection_master_edition)
+            .invoke_signed(coll_seeds)?;
+
         Ok(())
     }
     pub fn ticket_init(
@@ -173,13 +205,20 @@ mod helpers {
             acc.as_ref(),
             &[bump],
         ];
+        let bump_col = ctx.bumps.collection_mint_authority;
+        let acc_col = ctx.accounts.collection.key();
+        let signer_col : &[&[u8]] = &[
+            b"mint_authority",
+            acc_col.as_ref(),
+            &[bump_col],
+        ];
 
         let create_cpi = CreateV1CpiBuilder::new(&ctx.accounts.token_metadata_program)
             .metadata(&ctx.accounts.metadata.to_account_info())
             .mint(&ctx.accounts.mint.to_account_info(), false)
             .authority(&ctx.accounts.mint_authority.to_account_info())
             .payer(&ctx.accounts.payer.to_account_info())
-            .update_authority(&ctx.accounts.mint_authority.to_account_info(), false)
+            .update_authority(&ctx.accounts.collection_mint_authority.to_account_info(), true)
             .master_edition(Some(&ctx.accounts.master_edition))
             .system_program(&ctx.accounts.system_program)
             .sysvar_instructions(&ctx.accounts.sysvar_instructions)
@@ -192,44 +231,11 @@ mod helpers {
             .print_supply(PrintSupply::Zero)
             .decimals(0)
             .collection(collection)
-            .invoke_signed(&[signer_seeds]);
+            .invoke_signed(&[signer_seeds, signer_col]);
 
         Ok(())
     }
-    pub fn verify_collection(ctx: Context<VerifyCollection>) -> Result<()> {
-        let bump_coll = ctx.bumps.collection_mint_authority;
-        let bump_item = ctx.bumps.item_mint_authority;
-        let col_mint = ctx.accounts.collection_mint.key();
-        let coll_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            col_mint.as_ref(),
-            &[bump_coll],
-        ];
-        let it_mint = ctx.accounts.mint.key();
-        let item_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            it_mint.as_ref(),
-            &[bump_item],
-        ];
-        let signers = [coll_seeds, item_seeds];
 
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_metadata_program.to_account_info(),
-            SetAndVerifySizedCollectionItem {
-                metadata: ctx.accounts.metadata.to_account_info(),
-                collection_authority: ctx.accounts.collection_mint_authority.to_account_info(),
-                payer: ctx.accounts.payer.to_account_info(),
-                update_authority: ctx.accounts.item_mint_authority.to_account_info(),
-                collection_mint: ctx.accounts.collection_mint.to_account_info(),
-                collection_metadata: ctx.accounts.collection_metadata.to_account_info(),
-                collection_master_edition: ctx.accounts.collection_master_edition.to_account_info(),
-            },
-            &signers,
-        );
-        set_and_verify_sized_collection_item(cpi_ctx, None)?;
-
-        Ok(())
-    }
     pub fn ticket_payment(ctx: Context<Ticket>) -> Result<()> {
         let price = ctx.accounts.treasury.price;
         let cpi_program = ctx.accounts.system_program.to_account_info();
@@ -242,25 +248,19 @@ mod helpers {
     }
 
     pub fn burn(ctx: Context<Burn>) -> Result<()> {
-        let bump = ctx.bumps.mint_authority;
-        let acc = ctx.accounts.mint.key();
-        let signer_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            acc.as_ref(),
-            &[bump],
-        ];
-        let binding = [signer_seeds];
+
 
         BurnV1CpiBuilder::new(&ctx.accounts.token_metadata_program)
-            .authority(&ctx.accounts.mint_authority.to_account_info())
+            .authority(&ctx.accounts.owner.to_account_info())
             .collection_metadata(Some(&ctx.accounts.collection.to_account_info()))
+            .edition(Some(&ctx.accounts.master_edition.to_account_info()))
             .metadata(&ctx.accounts.metadata.to_account_info())
             .mint(&ctx.accounts.mint.to_account_info())
-            .master_edition(Some(&ctx.accounts.master_edition.to_account_info()))
             .token(&ctx.accounts.associated_token_account.to_account_info())
             .system_program(&ctx.accounts.system_program.to_account_info())
             .sysvar_instructions(&ctx.accounts.sysvar_instructions.to_account_info())
-            .invoke_signed(&binding)?;
+            .spl_token_program(&ctx.accounts.token_program.to_account_info())
+            .invoke()?;
 
         Ok(())
     }
@@ -333,7 +333,7 @@ pub struct VerifyCollection<'info> {
     /// CHECK:
     #[account(
         seeds = [b"mint_authority", collection_mint.key().as_ref()],
-        bump
+        bump,
     )]
     pub collection_mint_authority: UncheckedAccount<'info>,
 
@@ -351,7 +351,7 @@ pub struct VerifyCollection<'info> {
     pub collection_master_edition: UncheckedAccount<'info>,
     /// CHECK:
     #[account(mut)]
-    pub metadata: UncheckedAccount<'info>,
+    pub item_metadata: UncheckedAccount<'info>,
     /// CHECK:
     #[account(address = mpl_token_metadata::ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
@@ -398,9 +398,15 @@ pub struct TicketInit<'info> {
     pub payer: Signer<'info>,
     #[account(mut)]
     pub mint: Account<'info, Mint>,
-    ///CHECK
+    /// CHECK:
     #[account(mut)]
     pub collection: UncheckedAccount<'info>,
+    /// CHECK:
+    #[account(
+        seeds = [b"mint_authority", collection.key().as_ref()],
+        bump
+    )]
+    pub collection_mint_authority: UncheckedAccount<'info>,
     /// CHECK:
     #[account(mut)]
     pub metadata: UncheckedAccount<'info>,
@@ -460,8 +466,13 @@ pub struct Burn<'info> {
     pub master_edition: UncheckedAccount<'info>,
     #[account(mut)]
     pub mint: Account<'info, Mint>,
-    #[account(mut)]
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = owner,
+    )]
     pub associated_token_account: Account<'info, TokenAccount>,
+    pub owner: Signer<'info>,
     /// CHECK
     #[account(address = mpl_token_metadata::ID)]
     pub token_metadata_program: UncheckedAccount<'info>,

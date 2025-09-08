@@ -186,6 +186,7 @@ describe('nft-tickets', () => {
                 payer: wallet,
                 mint: ticketMint,
                 collection: collectionMint,
+                collectionMintAuthority: collAuth,
                 metadata: tMd,
                 masterEdition: tMe,
                 tokenMetadataProgram: TMID,
@@ -207,7 +208,7 @@ describe('nft-tickets', () => {
                 itemMintAuthority: ticketAuth,
                 collectionMetadata: mdPda(collectionMint),
                 collectionMasterEdition: mePda(collectionMint),
-                metadata: tMd,
+                itemMetadata: tMd,
                 tokenMetadataProgram: TMID,
             })
             .rpc();
@@ -233,8 +234,8 @@ describe('nft-tickets', () => {
         const sig5 = await program.methods
             .burn()
             .accounts({
-                mintAuthority: ticketAuth,
-                collection: collectionMint,
+                owner: wallet,                                           // ✅ владелец (signer)
+                collection: mdPda(collectionMint),               // ✅ PDA метадаты коллекции
                 metadata: tMd,
                 masterEdition: tMe,
                 mint: ticketMint,
