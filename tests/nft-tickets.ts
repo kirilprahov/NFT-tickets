@@ -143,8 +143,7 @@ describe('nft-tickets', () => {
 
         const ticketAuth = mintAuthPda(ticketMint);
         const collAuth = mintAuthPda(collectionMint);
-
-        const sig0 = await program.methods
+        const sig1 = await program.methods
             .initMint()
             .accounts({
                 mint: ticketMint,
@@ -155,13 +154,30 @@ describe('nft-tickets', () => {
             })
             .signers([ticketKp])
             .rpc();
-        await waitConfirmed(sig0);
+        await waitConfirmed(sig1);
 
         const ticketInfo = await getMint(provider.connection, ticketMint);
         assert.equal(ticketInfo.mintAuthority?.toBase58(), ticketAuth.toBase58());
+        const treasury = treasuryPda(collectionMint);
+        const balBefore = await provider.connection.getBalance(treasury);
+        const sig0 = await program.methods
+            .ticketPayment()
+            .accounts({
+                mint: ticketMint,
+                collectionMint: collectionMint,
+                treasury,
+                payer: wallet,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+        await waitConfirmed(sig0);
+        const balAfter = await provider.connection.getBalance(treasury);
+        assert.isAbove(balAfter, balBefore);
+
 
         const ataTicket = await getAssociatedTokenAddress(ticketMint, wallet, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
-        const sig1 = await program.methods
+        const sig2 = await program.methods
             .mintNft()
             .accounts({
                 mint: ticketMint,
@@ -173,14 +189,14 @@ describe('nft-tickets', () => {
                 associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
             })
             .rpc();
-        await waitConfirmed(sig1);
+        await waitConfirmed(sig2);
 
         const ticketAcc = await getAccount(provider.connection, ataTicket);
         assert.equal(Number(ticketAcc.amount), 1);
 
         const tMd = mdPda(ticketMint);
         const tMe = mePda(ticketMint);
-        const sig2 = await program.methods
+        const sig3 = await program.methods
             .ticketInit('Ticket #1', 'TIX', 'https://example.com/ticket.json', 550)
             .accounts({
                 payer: wallet,
@@ -196,9 +212,9 @@ describe('nft-tickets', () => {
                 sysvarInstructions: SYSVAR_IX,
             })
             .rpc();
-        await waitConfirmed(sig2);
+        await waitConfirmed(sig3);
 
-        const sig3 = await program.methods
+        const sig4 = await program.methods
             .verifyCollection()
             .accounts({
                 mint: ticketMint,
@@ -210,32 +226,31 @@ describe('nft-tickets', () => {
                 collectionMasterEdition: mePda(collectionMint),
                 itemMetadata: tMd,
                 tokenMetadataProgram: TMID,
-            })
-            .rpc();
-        await waitConfirmed(sig3);
 
-        const treasury = treasuryPda(collectionMint);
-        const balBefore = await provider.connection.getBalance(treasury);
-        const sig4 = await program.methods
-            .ticketPayment()
-            .accounts({
-                mint: ticketMint,
-                collectionMint: collectionMint,
-                treasury,
-                payer: wallet,
-                tokenProgram: TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId,
             })
             .rpc();
         await waitConfirmed(sig4);
-        const balAfter = await provider.connection.getBalance(treasury);
-        assert.isAbove(balAfter, balBefore);
 
         const sig5 = await program.methods
+            .utilize()
+            .accounts({
+                metadata: tMd,
+                associatedTokenAccount: ataTicket,
+                mint: ticketMint,
+                owner: wallet,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId,
+                tokenMetadataProgram: TMID,
+            })
+            .rpc()
+        await waitConfirmed(sig5)
+
+        const sig6 = await program.methods
             .burn()
             .accounts({
-                owner: wallet,                                           // ✅ владелец (signer)
-                collection: mdPda(collectionMint),               // ✅ PDA метадаты коллекции
+                owner: wallet,
+                collection: mdPda(collectionMint),
                 metadata: tMd,
                 masterEdition: tMe,
                 mint: ticketMint,
@@ -246,7 +261,7 @@ describe('nft-tickets', () => {
                 sysvarInstructions: SYSVAR_IX,
             })
             .rpc();
-        await waitConfirmed(sig5);
+        await waitConfirmed(sig6);
 
         const tAfter = await getMint(provider.connection, ticketMint);
         assert.equal(Number(tAfter.supply), 0);

@@ -52,6 +52,9 @@ pub mod nft_tickets {
     pub fn ticket_payment(ctx: Context<Ticket>) -> Result<()> {
         helpers::ticket_payment(ctx)
     }
+    pub fn utilize(ctx: Context<UtilizeTicket>) -> Result<()> {
+        helpers::utilize(ctx)
+    }
     pub fn burn(ctx: Context<Burn>) -> Result<()> {
         helpers::burn(ctx)
     }
@@ -62,7 +65,7 @@ mod helpers {
     use anchor_lang::solana_program::program::invoke_signed;
     use anchor_lang::solana_program::system_program;
     use anchor_lang::system_program::transfer;
-    use mpl_token_metadata::instructions::{BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs, SetAndVerifySizedCollectionItemCpiBuilder};
+    use mpl_token_metadata::instructions::{BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs, SetAndVerifySizedCollectionItemCpiBuilder, UtilizeCpiBuilder};
     use mpl_token_metadata::types::{CreateArgs, UseMethod, Uses};
 
     pub fn init_mint(_ctx: Context<InitMint>) -> Result<()> {
@@ -226,6 +229,11 @@ mod helpers {
             .name(name)
             .symbol(symbol)
             .uri(uri)
+            .uses(Uses {
+                use_method: UseMethod::Single,
+                remaining: 1,
+                total: 1,
+            })
             .seller_fee_basis_points(seller_fee_basis_points)
             .token_standard(TokenStandard::NonFungible)
             .print_supply(PrintSupply::Zero)
@@ -245,6 +253,28 @@ mod helpers {
         };
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
         transfer(cpi_ctx, price)
+    }
+    pub fn utilize(ctx: Context<UtilizeTicket>) -> Result<()> {
+        {
+            let data_ref = ctx.accounts.metadata.try_borrow_data()?;
+            let mut slice: &[u8] = &data_ref;
+            let meta = Metadata::deserialize(&mut slice)?;
+            msg!("Metadata Uses = {:?}", meta.uses);
+
+        }
+        UtilizeCpiBuilder::new(&ctx.accounts.token_metadata_program)
+            .metadata(&ctx.accounts.metadata.to_account_info())
+            .token_account(&ctx.accounts.associated_token_account.to_account_info())
+            .mint(&ctx.accounts.mint.to_account_info())
+            .use_authority(&ctx.accounts.owner.to_account_info())
+            .owner(&ctx.accounts.owner.to_account_info())
+            .token_program(&ctx.accounts.token_program.to_account_info())
+            .ata_program(&ctx.accounts.associated_token_program.to_account_info())
+            .system_program(&ctx.accounts.system_program.to_account_info())
+            .rent(&ctx.accounts.rent.to_account_info())
+            .number_of_uses(1)
+            .invoke()?;
+        Ok(())
     }
 
     pub fn burn(ctx: Context<Burn>) -> Result<()> {
@@ -445,6 +475,26 @@ pub struct Ticket<'info> {
     pub payer: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)]
+pub struct UtilizeTicket<'info> {
+    /// CHECK:
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+    /// CHECK:
+    #[account(mut)]
+    pub associated_token_account: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+    pub owner: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+    /// CHECK:
+    #[account(address = mpl_token_metadata::ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
+
 }
 
 #[derive(Accounts)]
