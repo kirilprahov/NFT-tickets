@@ -12,6 +12,160 @@ declare_id!("UdaXXAyGLw94jH4e3nqFmHdkKvPe1rgUxi9h8N1V4cT");
 #[program]
 pub mod nft_tickets {
     use super::*;
+    use anchor_lang::system_program::transfer;
+    pub fn create_event(
+        ctx: Context<CreateEvent>,
+        name: String,
+        symbol: String,
+        uri: String,
+        seller_fee_basis_points: u16,
+        price: u64,
+        event_ts: u64,
+    ) -> Result<()> {
+        let init_mint_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.init_mint,
+            &[],
+            InitMintBumps {
+                mint_authority: ctx.bumps.init_mint.mint_authority,
+            },
+        );
+        helpers::init_mint(init_mint_context);
+        let mint_one_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.mint_one,
+            &[],
+            MintOneBumps {
+                mint_authority: ctx.bumps.mint_one.mint_authority,
+            },
+        );
+        helpers::mint_nft(mint_one_context);
+        let collection_init_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.collection_init,
+            &[],
+            CollectionInitBumps {
+                treasury: ctx.bumps.collection_init.treasury,
+                mint_authority: ctx.bumps.collection_init.mint_authority,
+            },
+        );
+        helpers::collection_init(
+            collection_init_context,
+            name,
+            symbol,
+            uri,
+            seller_fee_basis_points,
+            price,
+            event_ts,
+        );
+        Ok(())
+    }
+
+    pub fn buy_ticket(
+        ctx: Context<BuyTicket>,
+        name: String,
+        symbol: String,
+        uri: String,
+        seller_fee_basis_points: u16,
+    ) -> Result<()> {
+        msg!("buy_ticket: ticket_payment");
+        let ticket_payment_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.ticket_payment,
+            &[],
+            TicketBumps {
+                treasury: ctx.bumps.ticket_payment.treasury,
+            },
+        );
+        helpers::ticket_payment(ticket_payment_context);
+        msg!("buy_ticket: init_mint");
+        let init_mint_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.init_mint,
+            &[],
+            InitMintBumps {
+                mint_authority: ctx.bumps.init_mint.mint_authority,
+            },
+        );
+        helpers::init_mint(init_mint_context);
+        msg!("buy_ticket: mint_one");
+        let mint_one_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.mint_one,
+            &[],
+            MintOneBumps {
+                mint_authority: ctx.bumps.mint_one.mint_authority,
+            },
+        );
+        helpers::mint_nft(mint_one_context);
+        msg!("buy_ticket: ticket_init");
+        let ticket_init_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.ticket_init,
+            &[],
+            TicketInitBumps {
+                collection_mint_authority: ctx.bumps.ticket_init.collection_mint_authority,
+                mint_authority: ctx.bumps.mint_one.mint_authority,
+            },
+        );
+        helpers::ticket_init(
+            ticket_init_context,
+            name,
+            symbol,
+            uri,
+            seller_fee_basis_points,
+        );
+        msg!("buy_ticket: verify_collection");
+        let verify_collection_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.verify_collection,
+            &[],
+            VerifyCollectionBumps {
+                collection_mint_authority: ctx.bumps.ticket_init.collection_mint_authority,
+                item_mint_authority: ctx.bumps.mint_one.mint_authority,
+            },
+        );
+        helpers::verify_collection(verify_collection_context);
+        Ok(())
+    }
+    pub fn return_funds(ctx: Context<ReturnFunds>) -> Result<()> {
+        {
+            let data_ref = ctx.accounts.ticket_metadata.try_borrow_data()?;
+            let mut slice: &[u8] = &data_ref;
+            let meta = Metadata::deserialize(&mut slice)?;
+            if let Some(uses) = &meta.uses {
+                if uses.remaining < 1 {
+                    return err!(ErrorCode::NoUsesRemaining);
+                }
+            } else {
+                return err!(ErrorCode::NoUsesInit);
+            }
+        }
+        let burn_context = Context::new(
+            ctx.program_id,
+            &mut ctx.accounts.burn_ticket,
+            &[],
+            BurnBumps {
+            },
+        );
+        helpers::burn(burn_context)?;
+        let clock = Clock::get()?;
+        require!(ctx.accounts.treasury.event_ts > clock.unix_timestamp as u64, ErrorCode::EventStarted);
+        let seeds = &[
+            b"treasury",
+            ctx.accounts.collection_mint.key.as_ref(),
+            &[ctx.bumps.treasury],
+        ];
+        let price = ctx.accounts.treasury.price;
+
+        let from_info = ctx.accounts.treasury.to_account_info();
+        let to_info = ctx.accounts.asset_owner.to_account_info();
+        require!(from_info.lamports() >= price, ErrorCode::TreasuryUnderfunded);
+        **from_info.try_borrow_mut_lamports()? -= price;
+        **to_info.try_borrow_mut_lamports()? += price;
+        Ok(())
+    }
+
     pub fn init_mint(ctx: Context<InitMint>) -> Result<()> {
         helpers::init_mint(ctx)
     }
@@ -65,7 +219,10 @@ mod helpers {
     use anchor_lang::solana_program::program::invoke_signed;
     use anchor_lang::solana_program::system_program;
     use anchor_lang::system_program::transfer;
-    use mpl_token_metadata::instructions::{BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs, SetAndVerifySizedCollectionItemCpiBuilder, UtilizeCpiBuilder};
+    use mpl_token_metadata::instructions::{
+        BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs,
+        SetAndVerifySizedCollectionItemCpiBuilder, UtilizeCpiBuilder,
+    };
     use mpl_token_metadata::types::{CreateArgs, UseMethod, Uses};
 
     pub fn init_mint(_ctx: Context<InitMint>) -> Result<()> {
@@ -76,11 +233,7 @@ mod helpers {
     pub fn mint_nft(ctx: Context<MintOne>) -> Result<()> {
         let bump = ctx.bumps.mint_authority;
         let acc = ctx.accounts.mint.key();
-        let signer_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            acc.as_ref(),
-            &[bump],
-        ];
+        let signer_seeds: &[&[u8]] = &[b"mint_authority", acc.as_ref(), &[bump]];
         mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -123,11 +276,7 @@ mod helpers {
 
         let bump = ctx.bumps.mint_authority;
         let acc = ctx.accounts.mint.key();
-        let signer_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            acc.as_ref(),
-            &[bump],
-        ];
+        let signer_seeds: &[&[u8]] = &[b"mint_authority", acc.as_ref(), &[bump]];
 
         let create_cpi = CreateV1CpiBuilder::new(&ctx.accounts.token_metadata_program)
             .metadata(&ctx.accounts.metadata.to_account_info())
@@ -153,24 +302,25 @@ mod helpers {
     pub fn verify_collection(ctx: Context<VerifyCollection>) -> Result<()> {
         let bump_coll = ctx.bumps.collection_mint_authority;
         let col_mint = ctx.accounts.collection_mint.key();
-        let coll_seeds: &[&[&[u8]]] = &[&[
-            b"mint_authority",
-            col_mint.as_ref(),
-            &[bump_coll]],
-        ];
-        let (expected_md_pda, _) =
-            Metadata::find_pda(&ctx.accounts.collection_mint.key());
+        let coll_seeds: &[&[&[u8]]] = &[&[b"mint_authority", col_mint.as_ref(), &[bump_coll]]];
+        let (expected_md_pda, _) = Metadata::find_pda(&ctx.accounts.collection_mint.key());
         require_keys_eq!(
-        expected_md_pda,
-        ctx.accounts.collection_metadata.key(),
-        ErrorCode::MetadatapdaMismatch
-    );
+            expected_md_pda,
+            ctx.accounts.collection_metadata.key(),
+            ErrorCode::MetadatapdaMismatch
+        );
         {
             let data_ref = ctx.accounts.collection_metadata.try_borrow_data()?;
             let mut slice: &[u8] = &data_ref;
             let meta = Metadata::deserialize(&mut slice)?;
-            msg!("collection_metadata.update_authority = {}", meta.update_authority);
-            msg!("passed collection_mint_authority     = {}", ctx.accounts.collection_mint_authority.key());
+            msg!(
+                "collection_metadata.update_authority = {}",
+                meta.update_authority
+            );
+            msg!(
+                "passed collection_mint_authority     = {}",
+                ctx.accounts.collection_mint_authority.key()
+            );
         }
         SetAndVerifySizedCollectionItemCpiBuilder::new(&ctx.accounts.token_metadata_program)
             .metadata(&ctx.accounts.item_metadata)
@@ -203,25 +353,20 @@ mod helpers {
         };
         let bump = ctx.bumps.mint_authority;
         let acc = ctx.accounts.mint.key();
-        let signer_seeds: &[&[u8]] = &[
-            b"mint_authority",
-            acc.as_ref(),
-            &[bump],
-        ];
+        let signer_seeds: &[&[u8]] = &[b"mint_authority", acc.as_ref(), &[bump]];
         let bump_col = ctx.bumps.collection_mint_authority;
         let acc_col = ctx.accounts.collection.key();
-        let signer_col : &[&[u8]] = &[
-            b"mint_authority",
-            acc_col.as_ref(),
-            &[bump_col],
-        ];
+        let signer_col: &[&[u8]] = &[b"mint_authority", acc_col.as_ref(), &[bump_col]];
 
         let create_cpi = CreateV1CpiBuilder::new(&ctx.accounts.token_metadata_program)
             .metadata(&ctx.accounts.metadata.to_account_info())
             .mint(&ctx.accounts.mint.to_account_info(), false)
             .authority(&ctx.accounts.mint_authority.to_account_info())
             .payer(&ctx.accounts.payer.to_account_info())
-            .update_authority(&ctx.accounts.collection_mint_authority.to_account_info(), true)
+            .update_authority(
+                &ctx.accounts.collection_mint_authority.to_account_info(),
+                true,
+            )
             .master_edition(Some(&ctx.accounts.master_edition))
             .system_program(&ctx.accounts.system_program)
             .sysvar_instructions(&ctx.accounts.sysvar_instructions)
@@ -231,8 +376,8 @@ mod helpers {
             .uri(uri)
             .uses(Uses {
                 use_method: UseMethod::Single,
-                remaining: 1,
-                total: 1,
+                remaining: 1, // 2 only for test must be 1
+                total: 1, // 2 only for test must be 1
             })
             .seller_fee_basis_points(seller_fee_basis_points)
             .token_standard(TokenStandard::NonFungible)
@@ -259,8 +404,13 @@ mod helpers {
             let data_ref = ctx.accounts.metadata.try_borrow_data()?;
             let mut slice: &[u8] = &data_ref;
             let meta = Metadata::deserialize(&mut slice)?;
-            msg!("Metadata Uses = {:?}", meta.uses);
-
+            if let Some(uses) = &meta.uses {
+                if uses.remaining < 1 {
+                    return err!(ErrorCode::NoUsesRemaining);
+                }
+            } else {
+                return err!(ErrorCode::NoUsesInit);
+            }
         }
         UtilizeCpiBuilder::new(&ctx.accounts.token_metadata_program)
             .metadata(&ctx.accounts.metadata.to_account_info())
@@ -278,8 +428,6 @@ mod helpers {
     }
 
     pub fn burn(ctx: Context<Burn>) -> Result<()> {
-
-
         BurnV1CpiBuilder::new(&ctx.accounts.token_metadata_program)
             .authority(&ctx.accounts.owner.to_account_info())
             .collection_metadata(Some(&ctx.accounts.collection.to_account_info()))
@@ -303,6 +451,72 @@ pub struct Treasury {
     pub event_ts: u64,
     pub bump: u8,
     pub price: u64,
+}
+
+#[derive(Accounts)]
+pub struct CreateEvent<'info> {
+    pub init_mint: InitMint<'info>,
+    pub mint_one: MintOne<'info>,
+    pub collection_init: CollectionInit<'info>,
+}
+#[derive(Accounts)]
+pub struct BuyTicket<'info> {
+    pub ticket_payment: Ticket<'info>,
+    pub init_mint: InitMint<'info>,
+    pub mint_one: MintOne<'info>,
+    pub ticket_init: TicketInit<'info>,
+    pub verify_collection: VerifyCollection<'info>,
+}
+#[derive(Accounts)]
+pub struct ReturnFunds<'info> {
+    #[account(
+        mut,
+        seeds = [b"treasury", collection_mint.key().as_ref()],
+        bump
+    )]
+    pub treasury: Account<'info, Treasury>,
+    /// CHECK:
+    pub collection_mint: UncheckedAccount<'info>,
+    /// CHECK:
+    pub ticket_mint: UncheckedAccount<'info>,
+    /// CHECK:
+    pub ticket_metadata: UncheckedAccount<'info>,
+    /// CHECK:
+    #[account(mut)]
+    pub asset_owner: AccountInfo<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub burn_ticket: Burn<'info>,
+}
+#[derive(Accounts)]
+pub struct Burn<'info> {
+    /// CHECK:
+    #[account(mut)]
+    pub collection: UncheckedAccount<'info>,
+    /// CHECK:
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+    /// CHECK:
+    #[account(mut)]
+    pub master_edition: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = owner,
+    )]
+    pub associated_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    /// CHECK
+    #[account(address = mpl_token_metadata::ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    /// CHECK
+    #[account(address = solana_program::sysvar::instructions::ID)]
+    pub sysvar_instructions: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -461,8 +675,6 @@ pub struct TicketInit<'info> {
 
 #[derive(Accounts)]
 pub struct Ticket<'info> {
-    #[account(mut)]
-    pub mint: Account<'info, Mint>,
     #[account(
         mut,
         seeds = [b"treasury", collection_mint.key().as_ref()],
@@ -494,47 +706,20 @@ pub struct UtilizeTicket<'info> {
     /// CHECK:
     #[account(address = mpl_token_metadata::ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
-
 }
 
-#[derive(Accounts)]
-pub struct Burn<'info> {
-    /// CHECK:
-    #[account(
-    seeds = [b"mint_authority", mint.key().as_ref()],
-    bump
-    )]
-    pub mint_authority: UncheckedAccount<'info>,
-    /// CHECK:
-    #[account(mut)]
-    pub collection: UncheckedAccount<'info>,
-    /// CHECK:
-    #[account(mut)]
-    pub metadata: UncheckedAccount<'info>,
-    /// CHECK:
-    #[account(mut)]
-    pub master_edition: UncheckedAccount<'info>,
-    #[account(mut)]
-    pub mint: Account<'info, Mint>,
-    #[account(
-        mut,
-        associated_token::mint = mint,
-        associated_token::authority = owner,
-    )]
-    pub associated_token_account: Account<'info, TokenAccount>,
-    pub owner: Signer<'info>,
-    /// CHECK
-    #[account(address = mpl_token_metadata::ID)]
-    pub token_metadata_program: UncheckedAccount<'info>,
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-    /// CHECK
-    #[account(address = solana_program::sysvar::instructions::ID)]
-    pub sysvar_instructions: UncheckedAccount<'info>,
-}
+
 
 #[error_code]
 pub enum ErrorCode {
     #[msg("Metadata PDA mismatch")]
     MetadatapdaMismatch,
+    #[msg("No uses remaining")]
+    NoUsesRemaining,
+    #[msg("Uses not initialized")]
+    NoUsesInit,
+    #[msg("Event already started")]
+    EventStarted,
+    #[msg("Treasury has not enough funds")]
+    TreasuryUnderfunded,
 }
