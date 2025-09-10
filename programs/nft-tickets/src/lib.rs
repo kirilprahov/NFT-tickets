@@ -7,6 +7,14 @@ use anchor_spl::token::{mint_to, Mint, MintTo, Token, TokenAccount};
 use mpl_token_metadata::accounts::Metadata;
 use mpl_token_metadata::instructions::CreateV1CpiBuilder;
 use mpl_token_metadata::types::{Collection, CollectionDetails, PrintSupply, TokenStandard};
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::system_program::transfer;
+use mpl_token_metadata::instructions::{
+    BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs,
+    SetAndVerifySizedCollectionItemCpiBuilder, UtilizeCpiBuilder,
+};
+use mpl_token_metadata::types::{CreateArgs, UseMethod, Uses};
+
 declare_id!("UdaXXAyGLw94jH4e3nqFmHdkKvPe1rgUxi9h8N1V4cT");
 
 #[program]
@@ -165,6 +173,18 @@ pub mod nft_tickets {
         **to_info.try_borrow_mut_lamports()? += price;
         Ok(())
     }
+    pub fn withdraw(ctx: Context<Withdraw>, ticket_count: u64) -> Result<()> {
+        let clock = Clock::get()?;
+        msg!("withdraw clock {}, event_ts: {}", clock.unix_timestamp, ctx.accounts.treasury.event_ts);
+        require!(ctx.accounts.treasury.event_ts < clock.unix_timestamp as u64, ErrorCode::EventNotStarted);
+        let price = ctx.accounts.treasury.price * ticket_count;
+        let from_info = ctx.accounts.treasury.to_account_info();
+        let to_info = ctx.accounts.event_owner.to_account_info();
+        require!(from_info.lamports() >= price, ErrorCode::TreasuryUnderfunded);
+        **from_info.try_borrow_mut_lamports()? -= price;
+        **to_info.try_borrow_mut_lamports()? += price;
+        Ok(())
+    }
 
     pub fn init_mint(ctx: Context<InitMint>) -> Result<()> {
         helpers::init_mint(ctx)
@@ -216,14 +236,6 @@ pub mod nft_tickets {
 
 mod helpers {
     use super::*;
-    use anchor_lang::solana_program::program::invoke_signed;
-    use anchor_lang::solana_program::system_program;
-    use anchor_lang::system_program::transfer;
-    use mpl_token_metadata::instructions::{
-        BurnV1Cpi, BurnV1CpiBuilder, CreateV1, CreateV1InstructionArgs,
-        SetAndVerifySizedCollectionItemCpiBuilder, UtilizeCpiBuilder,
-    };
-    use mpl_token_metadata::types::{CreateArgs, UseMethod, Uses};
 
     pub fn init_mint(_ctx: Context<InitMint>) -> Result<()> {
         msg!("Mint initialized");
@@ -489,6 +501,21 @@ pub struct ReturnFunds<'info> {
     pub burn_ticket: Burn<'info>,
 }
 #[derive(Accounts)]
+pub struct Withdraw<'info> {
+    #[account(
+        mut,
+        seeds = [b"treasury", collection_mint.key().as_ref()],
+        bump
+    )]
+    pub treasury: Account<'info, Treasury>,
+    /// CHECK:
+    pub collection_mint: UncheckedAccount<'info>,
+    /// CHECK:
+    pub event_owner: AccountInfo<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)]
 pub struct Burn<'info> {
     /// CHECK:
     #[account(mut)]
@@ -722,4 +749,6 @@ pub enum ErrorCode {
     EventStarted,
     #[msg("Treasury has not enough funds")]
     TreasuryUnderfunded,
+    #[msg("Event did not started")]
+    EventNotStarted,
 }
